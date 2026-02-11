@@ -18,7 +18,12 @@ from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore
-from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from llama_index.core.vector_stores import (
+    MetadataFilter,
+    MetadataFilters,
+    FilterCondition,
+    FilterOperator,
+)
 
 from llama_index.core.schema import QueryBundle
 
@@ -29,10 +34,99 @@ def read_json(path: str, default):
         return json.load(f)
 
 
-def expand_sources(graph_edges: Dict[str, List[str]], seeds: Set[str], hops: int) -> Set[str]:
+def build_inbound_edges(graph_edges: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    inbound: Dict[str, Set[str]] = {}
+    for src, neighbors in (graph_edges or {}).items():
+        inbound.setdefault(src, set())
+        for nb in neighbors or []:
+            inbound.setdefault(nb, set()).add(src)
+    return {k: sorted(v) for k, v in inbound.items()}
+
+
+def normalize_cli_tags(raw_tags: List[str]) -> List[str]:
+    tags: List[str] = []
+    for raw in raw_tags or []:
+        for part in str(raw).split(","):
+            t = part.strip()
+            if not t:
+                continue
+            if t.startswith("#"):
+                t = t[1:]
+            tags.append(t.lower())
+    return sorted(set(tags))
+
+
+def normalize_frontmatter_key(key: str) -> str:
+    raw = str(key).strip().lower()
+    if not raw:
+        return ""
+    raw = "_".join(raw.split())
+    out: List[str] = []
+    for ch in raw:
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_")
+
+
+def build_frontmatter_filters(raw_filters: List[str], mode: str) -> Optional[MetadataFilters]:
+    if not raw_filters:
+        return None
+
+    filters: List[MetadataFilter] = []
+    for raw in raw_filters:
+        item = str(raw).strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Invalid --fm value {item}, expected key=value")
+
+        key_raw, value_raw = item.split("=", 1)
+        key = normalize_frontmatter_key(key_raw)
+        value = value_raw.strip()
+        if not key:
+            raise ValueError(f"Invalid --fm key {key_raw}")
+        if value == "":
+            raise ValueError("Empty --fm value is not supported yet (this project drops empty YAML values at ingest time)")
+
+        filters.append(MetadataFilter(key=f"fm_{key}", value=value, operator=FilterOperator.EQ))
+
+    if not filters:
+        return None
+
+    condition = FilterCondition.AND if mode == "all" else FilterCondition.OR
+    return MetadataFilters(filters=filters, condition=condition)
+
+
+def select_sources_by_tags(nodes_meta: Dict[str, Dict], tags: List[str], mode: str) -> Set[str]:
+    if not tags:
+        return set(nodes_meta.keys())
+
+    tag_set = set(tags)
+    matched: Set[str] = set()
+
+    for source, meta in (nodes_meta or {}).items():
+        source_tags = set(str(x).lower() for x in ((meta or {}).get("tags") or []))
+        if mode == "all":
+            ok = tag_set.issubset(source_tags)
+        else:
+            ok = bool(source_tags & tag_set)
+        if ok:
+            matched.add(source)
+
+    return matched
+
+
+def expand_sources(
+    graph_edges: Dict[str, List[str]],
+    graph_inbound_edges: Dict[str, List[str]],
+    seeds: Set[str],
+    hops: int,
+    direction: str = "both",
+) -> Set[str]:
     """
-    无向/有向都能用的轻量扩展：这里按有向 edges 扩展；
-    你也可以自行加反向边（比如构建时把反向也写入）。
+    Graph 扩展：支持 out/in/both 三种方向。
     """
     if hops <= 0:
         return set(seeds)
@@ -44,7 +138,17 @@ def expand_sources(graph_edges: Dict[str, List[str]], seeds: Set[str], hops: int
         s, d = q.popleft()
         if d >= hops:
             continue
-        for nb in graph_edges.get(s, []) or []:
+        out_nbrs = graph_edges.get(s, []) or []
+        in_nbrs = graph_inbound_edges.get(s, []) or []
+
+        if direction == "out":
+            candidates = out_nbrs
+        elif direction == "in":
+            candidates = in_nbrs
+        else:
+            candidates = list(out_nbrs) + list(in_nbrs)
+
+        for nb in candidates:
             if nb not in seen:
                 seen.add(nb)
                 q.append((nb, d + 1))
@@ -63,10 +167,14 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
         max_sources: int = 10,
         final_top_k: int = 15,
         max_seed_sources: int = 5,
+        direction: str = "both",
+        allowed_sources: Optional[Set[str]] = None,
+        metadata_filters: Optional[MetadataFilters] = None,
     ):
         super().__init__()
         self._index = index
         self._edges = (graph or {}).get("edges", {}) or {}
+        self._inbound_edges = build_inbound_edges(self._edges)
         self._top_k = top_k
         self._hops = hops
         self._per_source_k = per_source_k
@@ -74,6 +182,9 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
         self._max_sources = max_sources
         self._final_top_k = final_top_k
         self._max_seed_sources = max_seed_sources
+        self._direction = direction
+        self._allowed_sources = set(allowed_sources) if allowed_sources is not None else None
+        self._metadata_filters = metadata_filters
 
     def _get_embed_model(self):
         # 兼容你当前 0.14.x 的常见结构（尽量不写死）
@@ -98,14 +209,28 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
             query_bundle.embedding = embed_model.get_query_embedding(query_str)
 
         # 1) primary retrieval（注意：传 QueryBundle，而不是 query_str）
-        base_retriever = self._index.as_retriever(similarity_top_k=self._top_k)
+        primary_top_k = self._top_k
+        if self._allowed_sources is not None:
+            primary_top_k = max(self._top_k * 4, self._top_k)
+
+        base_retriever = self._index.as_retriever(
+            similarity_top_k=primary_top_k,
+            filters=self._metadata_filters,
+        )
         primary = base_retriever.retrieve(query_bundle)
+        if self._allowed_sources is not None:
+            primary = [
+                r for r in primary
+                if (r.node.metadata or {}).get("source") in self._allowed_sources
+            ]
 
         # 2) seed sources（按 primary 最佳分排序）
         best_seed_score = {}
         for r in primary:
             s = (r.node.metadata or {}).get("source")
             if not s:
+                continue
+            if self._allowed_sources is not None and s not in self._allowed_sources:
                 continue
             sc = r.score or 0.0
             best_seed_score[s] = max(best_seed_score.get(s, 0.0), sc)
@@ -115,18 +240,41 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
         seed_set = set(seed_sources_sorted)
 
         # 3) 图扩展
-        expanded_set = expand_sources(self._edges, seed_set, self._hops)
+        expanded_set = expand_sources(
+            graph_edges=self._edges,
+            graph_inbound_edges=self._inbound_edges,
+            seeds=seed_set,
+            hops=self._hops,
+            direction=self._direction,
+        )
 
-        # 4) Source pruning（稳定可复现）
-        neighbor_sources = sorted([s for s in expanded_set if s not in seed_set])
-        ordered_sources = seed_sources_sorted + neighbor_sources
-        if self._max_sources is not None and self._max_sources > 0:
-            ordered_sources = ordered_sources[: self._max_sources]
+        if self._allowed_sources is not None:
+            expanded_set &= self._allowed_sources
+
+        # 如果 top_k 太小导致 seed 为空，退化成“标签过滤后的语义检索”。
+        if not seed_sources_sorted and self._allowed_sources:
+            ordered_sources = sorted(self._allowed_sources)
+            if self._max_sources is not None and self._max_sources > 0:
+                ordered_sources = ordered_sources[: self._max_sources]
+            seed_set = set()
+        else:
+            # 4) Source pruning（稳定可复现）
+            neighbor_sources = sorted([s for s in expanded_set if s not in seed_set])
+            ordered_sources = seed_sources_sorted + neighbor_sources
+            if self._max_sources is not None and self._max_sources > 0:
+                ordered_sources = ordered_sources[: self._max_sources]
 
         # 5) secondary retrieval（每个 source 一次向量库查询；embedding 不会重复了）
         secondary: List[NodeWithScore] = []
         for s in ordered_sources:
-            filters = MetadataFilters(filters=[ExactMatchFilter(key="source", value=s)])
+            source_filter = MetadataFilter(key="source", value=s, operator=FilterOperator.EQ)
+            filters = MetadataFilters(filters=[source_filter])
+            if self._metadata_filters is not None:
+                filters = MetadataFilters(
+                    filters=[self._metadata_filters, filters],
+                    condition=FilterCondition.AND,
+                )
+
             r = self._index.as_retriever(similarity_top_k=self._per_source_k, filters=filters)
             got = r.retrieve(query_bundle)  # 关键：仍然传 QueryBundle
 
@@ -159,6 +307,11 @@ def main():
     parser.add_argument("--top_k", type=int, default=int(os.getenv("TOP_K", "5")))
     parser.add_argument("--hops", type=int, default=int(os.getenv("GRAPH_HOPS", "1")))
     parser.add_argument("--per_source_k", type=int, default=int(os.getenv("PER_SOURCE_K", "2")))
+    parser.add_argument("--direction", choices=["out", "in", "both"], default=os.getenv("GRAPH_DIRECTION", "both"))
+    parser.add_argument("--tag", action="append", default=[], help="按标签过滤（可重复，支持逗号分隔）")
+    parser.add_argument("--tag_match", choices=["any", "all"], default=os.getenv("TAG_MATCH", "any"))
+    parser.add_argument("--fm", action="append", default=[], help="按 Frontmatter 过滤，格式 key=value，可重复")
+    parser.add_argument("--fm_match", choices=["any", "all"], default=os.getenv("FM_MATCH", "all"))
     parser.add_argument("--rag", action="store_true")
     args = parser.parse_args()
 
@@ -170,6 +323,21 @@ def main():
         raise ValueError("Missing DMX_API_KEY")
 
     graph = read_json(args.graph, default={"nodes": {}, "edges": {}})
+    graph_nodes = (graph or {}).get("nodes", {}) or {}
+    selected_tags = normalize_cli_tags(args.tag)
+
+    allowed_sources: Optional[Set[str]] = None
+    if selected_tags:
+        allowed_sources = select_sources_by_tags(graph_nodes, selected_tags, args.tag_match)
+        if not allowed_sources:
+            print(f"No graph nodes match tags={selected_tags} with mode={args.tag_match}.")
+            return
+
+    try:
+        fm_filters = build_frontmatter_filters(args.fm, args.fm_match)
+    except ValueError as e:
+        print(f"Invalid frontmatter filter: {e}")
+        return
 
     chroma_client = chromadb.PersistentClient(path=args.db)
     chroma_collection = chroma_client.get_or_create_collection(args.collection)
@@ -189,6 +357,9 @@ def main():
         top_k=args.top_k,
         hops=args.hops,
         per_source_k=args.per_source_k,
+        direction=args.direction,
+        allowed_sources=allowed_sources,
+        metadata_filters=fm_filters,
         max_sources=10,
         final_top_k=15,
     )

@@ -85,15 +85,22 @@ python ingest_graphrag.py
 python ingest_graphrag.py --prune
 ```
 
+> `ingest_graphrag.py` 已内置 Obsidian 清洗流程：移除 Frontmatter 正文噪音、Dataview 代码块、`![[...]]` 嵌入，并将 `[[...]]` 转为自然语言后再按 Markdown 结构切块。
+
 ### 图RAG版检索（GraphRAG：向量检索 + 图扩展 + 可选 RAG 合成）
 ```bash
 # 纯检索（看 GraphRAG 扩展后的上下文）
 python query_graphrag.py "莱文哈特与弥亚的关系？" --top_k 5 --hops 1 --per_source_k 2
 python query_graphrag.py "弗洛温家每日可能的饮食？" --top_k 5 --hops 1 --per_source_k 2
 
+# 标签过滤 + 双向图扩展
+python query_graphrag.py "本周工作重点" --tag 工作 --tag 项目A --tag_match any --direction both
+
+# Frontmatter 过滤（示例：YAML 里的 维度分类: [组织]）
+python query_graphrag.py "组织相关决策" --fm "维度分类=组织"
+python query_graphrag.py "精灵角色列举" --fm "种族=精灵"
+
 # RAG（LLM 合成）
 python query_graphrag.py "莱文哈特与弥亚的关系？" --rag
 python query_graphrag.py "弗洛温家每日可能的饮食？" --rag
 ```
-
-
