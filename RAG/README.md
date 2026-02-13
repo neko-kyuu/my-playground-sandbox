@@ -43,13 +43,11 @@ python query_db.py
 ## LlamaIndex 向量嵌入与检索 
 ```bash
 uv pip install -U llama-index-core llama-index-readers-file llama-index-llms-openai-like llama-index-embeddings-openai-like llama-index-vector-stores-chroma
-
-cd llama-index
 ```
 
 ### 基础ingest
 ```bash
-cd ingest_and_query
+cd llama-index/ingest_and_query
 
 # 首次建库（推荐加 --reset）
 python ingest.py --vault /path/to/markdown-notes --db /path/to/llama_chroma_db --reset
@@ -60,7 +58,7 @@ python ingest.py --reset
 
 ### 增强版ingest（带增量更新与删除）
 ```bash
-cd ingest_and_query
+cd llama-index/ingest_and_query
 
 # 首次：建议 reset
 python ingest_advanced.py --reset
@@ -74,7 +72,7 @@ python ingest_advanced.py --prune
 
 ### 检索
 ```bash
-cd ingest_and_query
+cd llama-index/ingest_and_query
 
 # 纯检索（不需要 LLM）
 python query.py "莱文哈特与弥亚的关系？" --top_k 5
@@ -91,7 +89,7 @@ python query.py "弗洛温家每日可能的饮食？" --rag
 uv pip install llama-index-readers-obsidian
 ```
 ```bash
-cd obsidian_graph_ingest_and_query
+cd llama-index/obsidian_graph_ingest_and_query
 
 # 首次：重建向量库 + 重建图谱
 python ingest_graphrag.py --reset
@@ -107,7 +105,7 @@ python ingest_graphrag.py --prune
 
 ### 图RAG版检索（GraphRAG：向量检索 + 图扩展 + 可选 RAG 合成）
 ```bash
-cd obsidian_graph_ingest_and_query
+cd llama-index/obsidian_graph_ingest_and_query
 
 # 纯检索（看 GraphRAG 扩展后的上下文）
 python query_graphrag.py "莱文哈特与弥亚的关系？" --top_k 5 --hops 1 --per_source_k 2

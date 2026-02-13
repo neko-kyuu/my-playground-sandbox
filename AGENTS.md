@@ -7,6 +7,7 @@ This file provides guidance when working with code in this repository.
 This is a **playground** for testing new features, experimental purposes, and Minimum Viable Product. This repository typically does not require unit testing or complex design; it focuses on rapid implementation.
 
 Each directory is distinguished by its purpose, and the naming follows the principles of clarity and distinctiveness.
+If you want to add a major feature to existing code, it's best to create a new folder rather than modifying the original code directly. This is to allow for better comparative experiments.
 
 ## README Guidelines
 
