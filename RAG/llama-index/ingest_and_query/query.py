@@ -13,7 +13,7 @@ from llama_index.llms.openai_like import OpenAILike
 
 
 def main():
-    load_dotenv()
+    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("q", help="question")

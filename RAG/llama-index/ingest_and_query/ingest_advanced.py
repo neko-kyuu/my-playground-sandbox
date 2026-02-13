@@ -66,7 +66,7 @@ def iter_all_sources(collection, batch_size: int = 2000) -> set[str]:
 
 
 def main():
-    load_dotenv()
+    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--vault", default=os.getenv("VAULT_PATH", "./markdown-notes"))

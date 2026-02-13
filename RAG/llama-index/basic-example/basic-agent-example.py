@@ -8,7 +8,7 @@ from llama_index.core import StorageContext
 
 from llama_index.embeddings.openai_like import OpenAILikeEmbedding
 
-load_dotenv() # 这行代码会自动读取 .env 文件并注入环境变量
+load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
 
 DMX_API_KEY = os.getenv("DMX_API_KEY")
 DMX_BASE_URL = os.getenv("DMX_BASE_URL", "https://www.dmxapi.cn/v1/")

@@ -297,7 +297,7 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
         return merged[: self._final_top_k]
 
 def main():
-    load_dotenv()
+    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("q")

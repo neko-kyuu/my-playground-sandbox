@@ -2,10 +2,19 @@
 [Openai 请求格式 - Embedding 文本向量化 API](https://doc.dmxapi.cn/embedding.html)
 DMXAPI 兼容 OpenAI 的接口格式作为嵌入服务，结合本地 ChromaDB 存储，.env保存环境变量
 
-## 启用虚拟环境
+## 环境准备
+python 3.12
+chromadb 1.5.0
+llama-index 0.14.13
+
+## 安装指定python版本
 ```bash
 uv python install 3.12
 uv venv --python 3.12 .venv
+```
+
+## 启用虚拟环境
+```bash
 source .venv/bin/activate
 ```
 
@@ -40,6 +49,8 @@ cd llama-index
 
 ### 基础ingest
 ```bash
+cd ingest_and_query
+
 # 首次建库（推荐加 --reset）
 python ingest.py --vault /path/to/markdown-notes --db /path/to/llama_chroma_db --reset
 
@@ -49,6 +60,8 @@ python ingest.py --reset
 
 ### 增强版ingest（带增量更新与删除）
 ```bash
+cd ingest_and_query
+
 # 首次：建议 reset
 python ingest_advanced.py --reset
 
@@ -61,6 +74,8 @@ python ingest_advanced.py --prune
 
 ### 检索
 ```bash
+cd ingest_and_query
+
 # 纯检索（不需要 LLM）
 python query.py "莱文哈特与弥亚的关系？" --top_k 5
 python query.py "弗洛温家每日可能的饮食？" --top_k 5
@@ -71,9 +86,12 @@ python query.py "莱文哈特与弥亚的关系？" --rag
 python query.py "弗洛温家每日可能的饮食？" --rag
 ```
 
-### 图RAG版ingest（增量建库 + 构建/更新图谱）
+### obsidian + 图RAG版ingest（增量建库 + 构建/更新图谱）
 ```bash
 uv pip install llama-index-readers-obsidian
+```
+```bash
+cd obsidian_graph_ingest_and_query
 
 # 首次：重建向量库 + 重建图谱
 python ingest_graphrag.py --reset
@@ -89,6 +107,8 @@ python ingest_graphrag.py --prune
 
 ### 图RAG版检索（GraphRAG：向量检索 + 图扩展 + 可选 RAG 合成）
 ```bash
+cd obsidian_graph_ingest_and_query
+
 # 纯检索（看 GraphRAG 扩展后的上下文）
 python query_graphrag.py "莱文哈特与弥亚的关系？" --top_k 5 --hops 1 --per_source_k 2
 python query_graphrag.py "弗洛温家每日可能的饮食？" --top_k 5 --hops 1 --per_source_k 2

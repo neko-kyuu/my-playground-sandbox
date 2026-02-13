@@ -373,7 +373,7 @@ def resolve_wikilink(link: str, note_index: Dict[str, str], vault_path: str) -> 
 
 
 def main():
-    load_dotenv()
+    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--vault", default=os.getenv("VAULT_PATH", "./markdown-notes"))
