@@ -17,4 +17,10 @@ The version installations/dependency installations (such as uv pip install, npm 
 
 If you install new dependency packages, be sure to record it in the README.md file.
 
+## Requirement
+
+Use `uv` to manage Python versions, create virtual environments, and install dependencies. The virtual environment needs to be created in the same directory as README.
+
+## Prohibit
+
 [IMPORTANT]: Do not execute scripts other than dependency installations without the user's explicit permission, as this may involve API fees.
