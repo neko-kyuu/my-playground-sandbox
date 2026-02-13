@@ -22,4 +22,5 @@ env.bak/
 .DS_Store
 
 # test resources
+RAG/evaluation/
 test-static-vault/
