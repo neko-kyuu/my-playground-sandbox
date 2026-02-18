@@ -31,3 +31,14 @@ python llm_select_key_links.py
 ```
 
 llm 侧使用 prompt 见 `key_links_prompt.md`
+
+一键脚本 `export_topic_candidates.py` + `llm_select_key_links.py`
+```bash
+python run_topic_key_links.py --topic RAG
+
+#可选输出文件：
+python run_topic_key_links.py \
+  --topic RAG \
+  --json-out rag_candidates.json \
+  --out rag_key_links.md
+```

@@ -82,6 +82,8 @@ JSON:
 {json}
 """.strip()
 
+DEFAULT_DOTENV_PATH = "/Users/nekokyuu/vscode/playground-sandbox/MCP/.env"
+
 
 def read_json_input(path: Optional[str]) -> dict:
     if path:
@@ -116,8 +118,47 @@ def call_llm(client: OpenAI, model: str, topic: str, payload: dict) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
+def select_key_links(
+    payload: dict,
+    *,
+    model: str,
+    api_key: str,
+    base_url: str = "",
+    min_items: int = 5,
+    max_items: int = 12,
+) -> List[str]:
+    topic = payload.get("topic") or "UNKNOWN"
+
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = OpenAI(**client_kwargs)
+
+    # First attempt
+    txt = call_llm(client, model, topic, payload)
+    bullets = extract_bullets(txt)
+
+    # If format violated, do one correction attempt
+    if len(bullets) < min_items:
+        correction = {
+            "error": "FORMAT_VIOLATION",
+            "required_format": "- [[Title]] — reason (one per line, 5–12 lines, no extra text)",
+            "previous_output": txt,
+        }
+        payload2 = dict(payload)
+        payload2["_correction"] = correction
+        txt2 = call_llm(client, model, topic, payload2)
+        bullets = extract_bullets(txt2)
+
+    # Final sanitation: enforce min/max by truncation (never add invented lines)
+    if len(bullets) > max_items:
+        bullets = bullets[:max_items]
+
+    return bullets
+
+
 def main():
-    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/MCP/.env")
+    load_dotenv(dotenv_path=DEFAULT_DOTENV_PATH)
 
     ap = argparse.ArgumentParser(description="Select Obsidian MOC Key Links using an LLM (stdin JSON -> bullets).")
     ap.add_argument("--json", default="", help="Path to exporter JSON. If omitted, read from stdin.")
@@ -132,32 +173,14 @@ def main():
         raise SystemExit("OPENAI_API_KEY is required.")
 
     payload = read_json_input(args.json or None)
-    topic = payload.get("topic") or "UNKNOWN"
-
-    client_kwargs = {"api_key": api_key}
-    if args.base_url:
-        client_kwargs["base_url"] = args.base_url
-    client = OpenAI(**client_kwargs)
-
-    # First attempt
-    txt = call_llm(client, args.model, topic, payload)
-    bullets = extract_bullets(txt)
-
-    # If format violated, do one correction attempt
-    if len(bullets) < args.min_items:
-        correction = {
-            "error": "FORMAT_VIOLATION",
-            "required_format": '- [[Title]] — reason (one per line, 5–12 lines, no extra text)',
-            "previous_output": txt,
-        }
-        payload2 = dict(payload)
-        payload2["_correction"] = correction
-        txt2 = call_llm(client, args.model, topic, payload2)
-        bullets = extract_bullets(txt2)
-
-    # Final sanitation: enforce min/max by truncation (never add invented lines)
-    if len(bullets) > args.max_items:
-        bullets = bullets[: args.max_items]
+    bullets = select_key_links(
+        payload,
+        model=args.model,
+        api_key=api_key,
+        base_url=args.base_url,
+        min_items=args.min_items,
+        max_items=args.max_items,
+    )
 
     # Print only bullets (or nothing if total failure)
     sys.stdout.write("\n".join(bullets).rstrip() + ("\n" if bullets else ""))
