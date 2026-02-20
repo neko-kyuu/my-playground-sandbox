@@ -121,4 +121,16 @@ python query_graphrag.py "精灵角色列举" --fm "种族=精灵"
 # RAG（LLM 合成）
 python query_graphrag.py "莱文哈特与弥亚的关系？" --rag
 python query_graphrag.py "弗洛温家每日可能的饮食？" --rag
+
+# Query Rewriting（对对比/多约束问题更有效，需要 DMX_CHAT_MODEL）
+python agentic_query_graphrag.py "对比A和B在xxx的优缺点，并考虑约束C" --rewrite --rag
+
+# rerank（可选：OpenAI 兼容 /rerank；需要配置 RERANK_MODEL）
+python agentic_query_graphrag.py "弗洛温家每日可能的饮食？" --rerank --rag
+
+# Agent Loop：资料不足/不确定 -> 补充检索词/子问题 -> 回到召回
+python agentic_query_graphrag.py "弗洛温家每日可能的饮食？" --agent --agent_iters 2 --rag
+
+# 关闭关键节点日志
+python agentic_query_graphrag.py "弗洛温家每日可能的饮食？" --quiet
 ```
