@@ -24,3 +24,4 @@ env.bak/
 # test resources
 RAG/evaluation/
 test-static-vault/
+fastAPI/debug.log
