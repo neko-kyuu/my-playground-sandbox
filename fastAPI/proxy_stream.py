@@ -34,6 +34,30 @@ from proxy_upstream import (
 logger = logging.getLogger("claude_to_openai_proxy")
 
 
+def _summarize_openai_response(openai_resp: Dict[str, Any]) -> str:
+    try:
+        choice0 = (openai_resp.get("choices") or [{}])[0]
+        finish_reason = choice0.get("finish_reason")
+        msg = choice0.get("message") or {}
+        content = msg.get("content")
+        tool_calls = msg.get("tool_calls") or []
+        content_len = len(content) if isinstance(content, str) else 0
+        if tool_calls:
+            tc0 = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+            fn0 = tc0.get("function") if isinstance(tc0, dict) else None
+            fn0 = fn0 if isinstance(fn0, dict) else {}
+            name0 = fn0.get("name")
+            args0 = fn0.get("arguments")
+            args_len0 = len(args0) if isinstance(args0, str) else 0
+            return (
+                f"finish_reason={finish_reason!r} content_len={content_len} "
+                f"tool_calls={len(tool_calls)} tool0_name={name0!r} tool0_args_len={args_len0}"
+            )
+        return f"finish_reason={finish_reason!r} content_len={content_len} tool_calls={len(tool_calls)}"
+    except Exception:
+        return "<unavailable>"
+
+
 async def _openai_non_stream_to_anthropic_sse(
     openai_resp: Dict[str, Any],
     *,
@@ -45,6 +69,9 @@ async def _openai_non_stream_to_anthropic_sse(
 
     This is used as a fallback when the upstream streaming connection keeps resetting.
     """
+    if DEBUG_UPSTREAM:
+        logger.debug("UPSTREAM non-stream response %s", _summarize_openai_response(openai_resp))
+
     msg = openai_to_anthropic_full(
         openai_resp,
         incoming_model=incoming_model,
@@ -525,10 +552,16 @@ async def openai_stream_to_anthropic_sse_with_retry(
         if st.get("started"):
             yield anthropic_sse({"type": "content_block_stop", "index": st["index"]})
 
+    stop_reason = map_finish_reason(finish_reason)
+    # If we emitted any tool_use blocks but upstream doesn't mark finish_reason correctly,
+    # Claude Code still needs stop_reason="tool_use" to continue by executing the tool.
+    if any(st.get("started") for st in tool_states.values()):
+        stop_reason = "tool_use"
+
     yield anthropic_sse(
         {
             "type": "message_delta",
-            "delta": {"stop_reason": map_finish_reason(finish_reason), "stop_sequence": None},
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
             "usage": {"output_tokens": 0},
         }
     )

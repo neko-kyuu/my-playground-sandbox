@@ -131,13 +131,18 @@ def openai_to_anthropic_full(
         )
 
     usage = openai_resp.get("usage") or {}
+    stop_reason = map_finish_reason(finish_reason)
+    # Some upstreams return finish_reason="stop" even when they emitted tool_calls.
+    # Claude Code relies on stop_reason="tool_use" to actually execute the tool call.
+    if tool_calls:
+        stop_reason = "tool_use"
     return {
         "id": f"msg_{uuid.uuid4().hex}",
         "type": "message",
         "role": "assistant",
         "model": incoming_model or fallback_model,
         "content": blocks,
-        "stop_reason": map_finish_reason(finish_reason),
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
@@ -150,4 +155,3 @@ def anthropic_sse(event_obj: Dict[str, Any]) -> str:
     evt = event_obj.get("type", "message")
     payload = json.dumps(event_obj, ensure_ascii=False)
     return f"event: {evt}\\ndata: {payload}\\n\\n"
-
