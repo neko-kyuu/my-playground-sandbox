@@ -22,7 +22,7 @@ Sometimes user may specify their own paths.
 When working in a specific directory, it's helpful to first read the README.md file to understand the process.
 If you are creating a new directory, be sure to create a README. Describe the purpose of each directory in short, but environment setup should be documented in detail.
 
-The version installations/dependency installations (such as `uv pip install`, `npm install`, etc.) mentioned in the documentation have usually already been executed; they are only for record-keeping and migration convenience.
+The version installations/dependency installations (such as `uv pip install`, `uv add`, `npm install`, etc.) mentioned in the documentation have usually already been executed; they are only for record-keeping and migration convenience.
 
 If you install new dependency packages, be sure to record it in the README.md file.
 
