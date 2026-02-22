@@ -1,0 +1,26 @@
+{
+  "dotenv_path": "/Users/nekokyuu/vscode/playground-sandbox/RAG/.env",
+  "db_path": "/Users/nekokyuu/vscode/playground-sandbox/RAG/llama-index/obsidian_graph_ingest_and_query/llama_chroma_db",
+  "collection": "quickstart",
+  "graph_path": "/Users/nekokyuu/vscode/playground-sandbox/RAG/llama-index/obsidian_graph_ingest_and_query/graphrag/obsidian_graph.json",
+  "dmx": {
+    "base_url": "https://www.dmxapi.cn/v1/",
+    "api_key_env": "DMX_API_KEY",
+    "embedding_model_env": "DMX_EMBEDDING_MODEL",
+    "chat_model_env": "DMX_CHAT_MODEL"
+  },
+  "defaults": {
+    "top_k": 5,
+    "hops": 1,
+    "per_source_k": 2,
+    "direction": "both",
+    "neighbor_boost": 0.85,
+    "max_sources": 10,
+    "final_top_k": 15,
+    "max_seed_sources": 5,
+    "max_results": 15,
+    "text_chars": 1200,
+    "context_k": 8
+  }
+}
+

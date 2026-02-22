@@ -25,3 +25,4 @@ env.bak/
 RAG/evaluation/
 test-static-vault/
 fastAPI/debug.log
+MCP/obsidian_graphrag_mcp/config.json
