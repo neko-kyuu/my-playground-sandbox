@@ -35,17 +35,20 @@ def load_obsidian_docs(vault_path: str):
 
 
 # -------- 通用工具 --------
-PIPELINE_VERSION = "graphrag-v3-obsidian-clean-fm-filter"
+PIPELINE_VERSION = "graphrag-v4-obsidian-clean-fm-filter"
 
 WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 TAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_\-/]+)")  # 简易 tag 规则
 
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 DATAVIEW_BLOCK_RE = re.compile(r"```(?:dataview|dataviewjs)\b[\s\S]*?```", re.IGNORECASE)
+LEAFLET_BLOCK_RE = re.compile(r"```leaflet\b[\s\S]*?```", re.IGNORECASE)
 EMBED_WIKILINK_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 WIKILINK_ALIAS_RE = re.compile(r"(?<!!)\[\[[^\]|]+\|([^\]]+)\]\]")
 WIKILINK_SIMPLE_RE = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
 CALLOUT_RE = re.compile(r"(?m)^\s{0,3}>\s*\[![^\]]+\][+-]?\s*")
+INFOBOX_CALLOUT_START_RE = re.compile(r"(?i)^\s{0,3}>\s*\[!infobox\][+-]?\s*.*$")
+BLOCKQUOTE_LINE_RE = re.compile(r"^\s{0,3}>")
 
 
 def parse_scalar_token(token: str):
@@ -164,6 +167,43 @@ def clean_obsidian_text(text: str) -> str:
 
     # 移除 Dataview 查询块，避免无语义噪音进入 embedding。
     s = DATAVIEW_BLOCK_RE.sub("\n", s)
+    # 移除 leaflet 代码块（通常是地图/交互配置，embedding 价值很低且噪声大）。
+    s = LEAFLET_BLOCK_RE.sub("\n", s)
+
+    def _unwrap_infobox_callouts(value: str) -> str:
+        """
+        清理 Obsidian callout: > [!infobox]
+        - 去掉行首的 >
+        - 丢弃 callout 标记行与内嵌图片行
+        - 保留表格/标题等正文内容
+        """
+        lines = (value or "").splitlines()
+        out_lines: List[str] = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            if INFOBOX_CALLOUT_START_RE.match(line):
+                i += 1
+                while i < len(lines) and BLOCKQUOTE_LINE_RE.match(lines[i]):
+                    inner = re.sub(r"^\s{0,3}>\s?", "", lines[i])
+                    stripped = inner.strip()
+                    if stripped.startswith("![[") and stripped.endswith("]]"):
+                        i += 1
+                        continue
+                    if re.fullmatch(r"!\[[^\]]*\]\([^)]+\)", stripped):
+                        i += 1
+                        continue
+                    out_lines.append(inner)
+                    i += 1
+                continue
+
+            out_lines.append(line)
+            i += 1
+
+        return "\n".join(out_lines)
+
+    s = _unwrap_infobox_callouts(s)
     # 移除 Obsidian 嵌入引用 ![[...]]。
     s = EMBED_WIKILINK_RE.sub("", s)
 
