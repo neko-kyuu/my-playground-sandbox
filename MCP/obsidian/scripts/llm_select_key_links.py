@@ -12,7 +12,7 @@ Dependencies:
 
 Environment variables:
   OPENAI_API_KEY (required)
-  OPENAI_MODEL (optional; default: gpt-4o-mini)
+  OPENAI_MODEL (optional; default: GLM-4.7-Flash)
   OPENAI_BASE_URL (optional; for OpenAI-compatible providers)
 """
 
@@ -162,7 +162,7 @@ def main():
 
     ap = argparse.ArgumentParser(description="Select Obsidian MOC Key Links using an LLM (stdin JSON -> bullets).")
     ap.add_argument("--json", default="", help="Path to exporter JSON. If omitted, read from stdin.")
-    ap.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), help="LLM model name.")
+    ap.add_argument("--model", default=os.getenv("OPENAI_MODEL", "GLM-4.7-Flash"), help="LLM model name.")
     ap.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL", ""), help="Optional OpenAI-compatible base URL.")
     ap.add_argument("--min-items", type=int, default=5)
     ap.add_argument("--max-items", type=int, default=12)
