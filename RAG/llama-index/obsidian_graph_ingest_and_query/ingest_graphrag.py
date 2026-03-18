@@ -127,13 +127,124 @@ def parse_simple_frontmatter(block: str) -> Dict[str, Any]:
     return data
 
 
-def split_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
+def split_frontmatter(text: str) -> Tuple[Dict[str, Any], str, str]:
     m = FRONTMATTER_RE.match(text or "")
     if not m:
-        return {}, text or ""
+        return {}, text or "", ""
     fm_block = m.group(1)
     body = (text or "")[m.end():]
-    return parse_simple_frontmatter(fm_block), body
+    return parse_simple_frontmatter(fm_block), body, fm_block
+
+
+def parse_boolish(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in {"true", "yes", "y", "1", "on"}:
+            return True
+        if low in {"false", "no", "n", "0", "off"}:
+            return False
+    return None
+
+
+def _scan_frontmatter_raw_for_rag_include(fm_raw: str) -> Optional[bool]:
+    """
+    仅用于识别 rag.include（允许如下写法）：
+    - rag.include: false
+    - rag: {"include": false}
+    - rag:
+        include: false
+    """
+    if not fm_raw:
+        return None
+
+    # 1) rag.include: false/true
+    m = re.search(r"(?im)^\s*rag\.include\s*:\s*(true|false)\s*$", fm_raw)
+    if m:
+        return m.group(1).lower() == "true"
+
+    # 2) inline rag: {...}
+    m = re.search(r"(?im)^\s*rag\s*:\s*(\{.*\})\s*$", fm_raw)
+    if m:
+        inline = m.group(1).strip()
+        try:
+            obj = json.loads(inline)
+            v = parse_boolish((obj or {}).get("include"))
+            if v is not None:
+                return v
+        except Exception:
+            m2 = re.search(r"(?i)\binclude\s*:\s*(true|false)\b", inline)
+            if m2:
+                return m2.group(1).lower() == "true"
+
+    # 3) block rag:\n  include: false
+    lines = fm_raw.splitlines()
+    in_rag = False
+    rag_indent: Optional[int] = None
+
+    for line in lines:
+        if not in_rag:
+            if re.match(r"(?i)^\s*rag\s*:\s*$", line):
+                in_rag = True
+                rag_indent = None
+            continue
+
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+
+        leading_spaces = len(line) - len(line.lstrip())
+        if rag_indent is None:
+            if leading_spaces == 0:
+                # rag: 后面立刻遇到下一个顶层 key（或格式不对）
+                return None
+            rag_indent = leading_spaces
+
+        if leading_spaces < (rag_indent or 0):
+            return None
+
+        stripped = line.strip()
+        m = re.match(r"(?i)^include\s*:\s*(true|false)\s*$", stripped)
+        if m:
+            return m.group(1).lower() == "true"
+
+    return None
+
+
+def should_include_for_rag(frontmatter: Dict[str, Any], frontmatter_raw: str) -> bool:
+    """
+    默认 include=True；当 rag.include == false 时排除该文档：
+    - 不向量化
+    - 不写入 obsidian_graph.json
+    """
+    # 1) 显式 rag.include（支持 rag.include / rag_include / rag-include）
+    for k in ("rag.include", "rag_include", "rag-include"):
+        if k in (frontmatter or {}):
+            v = parse_boolish((frontmatter or {}).get(k))
+            if v is not None:
+                return v
+
+    # 2) rag: {include: ...}（解析器可能把 inline-map 当成字符串）
+    rag_val = (frontmatter or {}).get("rag")
+    if isinstance(rag_val, dict):
+        v = parse_boolish(rag_val.get("include"))
+        if v is not None:
+            return v
+    if isinstance(rag_val, str) and rag_val.strip().startswith("{") and rag_val.strip().endswith("}"):
+        try:
+            obj = json.loads(rag_val.strip())
+            v = parse_boolish((obj or {}).get("include"))
+            if v is not None:
+                return v
+        except Exception:
+            pass
+
+    # 3) 兜底：扫描 raw frontmatter（兼容 block rag: include: false）
+    scanned = _scan_frontmatter_raw_for_rag_include(frontmatter_raw)
+    if scanned is not None:
+        return scanned
+
+    return True
 
 
 def normalize_tags(values: Any) -> List[str]:
@@ -462,17 +573,28 @@ def main():
     source_to_raw_text: Dict[str, str] = {}
     source_to_tags: Dict[str, List[str]] = {}
     to_index = []
+    excluded_sources: List[str] = []
 
     for doc in documents:
         source = get_doc_source(doc)
-        current_sources.add(source)
-        source_to_doc[source] = doc
 
         title = get_doc_title(source)
         raw_text = doc.text or ""
+
+        frontmatter, body_text, frontmatter_raw = split_frontmatter(raw_text)
+        if not should_include_for_rag(frontmatter, frontmatter_raw):
+            # 该文件仍然存在于 vault，但明确要求不参与向量化/图谱：确保从库里移除。
+            try:
+                chroma_collection.delete(where={"source": source})
+            except Exception:
+                pass
+            excluded_sources.append(source)
+            continue
+
+        current_sources.add(source)
+        source_to_doc[source] = doc
         source_to_raw_text[source] = raw_text
 
-        frontmatter, body_text = split_frontmatter(raw_text)
         cleaned_text = clean_obsidian_text(body_text)
         if cleaned_text:
             set_doc_text(doc, cleaned_text)
@@ -584,6 +706,8 @@ def main():
     print(f"- collection='{args.collection}' db='{args.db}'")
     print(f"- graph='{args.graph}' nodes={len(graph['nodes'])} edges={sum(len(v) for v in graph['edges'].values())}")
     print(f"- indexed(updated/new) docs={len(to_index)}")
+    if excluded_sources:
+        print(f"- excluded(rag.include=false) docs={len(excluded_sources)}")
 
 
 if __name__ == "__main__":
