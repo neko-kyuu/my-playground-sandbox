@@ -1,10 +1,10 @@
 ## Obsidian GraphRAG MCP（stdio）
 
-把 `RAG/llama-index/obsidian_graph_ingest_and_query/agentic_query_graphrag.py` 的“向量 + 图扩展召回”能力封装为 MCP server（默认 stdio），供 Claude Code / Codex / Gemini CLI / roo code 等 MCP 客户端调用。
+把 `RAG/llama-index/obsidian_graph_ingest_and_query/agentic_query_graphrag.py` 的“BM25 + 向量 + 图扩展召回”能力封装为 MCP server（默认 stdio），供 Claude Code / Codex / Gemini CLI / roo code 等 MCP 客户端调用。
 
 ### 能力
 
-- Tool: `graphrag_search`：纯检索，返回 top chunks（可选 tags / frontmatter 过滤）
+- Tool: `graphrag_search`：混合检索（BM25 + GraphRAG，使用 RRF 融合排序），返回 top chunks（可选 tags / frontmatter 过滤）
 - Tool: `graphrag_generate`（可选）：最简生成（基于 `graphrag_search` 的上下文 + DMX chat）
 - Resource: `config://graphrag`：返回已加载配置（已脱敏）
 - Resource: `stats://graphrag`：返回索引/图的基础统计
@@ -141,6 +141,6 @@ python client_test.py --config ./config.json --generate "弗洛温家每日可�
 
 ### 注意事项
 
-- `graphrag_search` 会调用 embedding（DMX/OpenAI-compatible），会产生网络请求与费用。
+- `graphrag_search` 会调用 embedding（DMX/OpenAI-compatible）用于 GraphRAG 分支；BM25 分支在本地完成，因此整体仍会产生网络请求与费用。
 - 为避免离线环境启动卡住，本 server 会关闭 Chroma 的 anonymized telemetry（不影响功能）。
 - 本 server 不包含 ingest；请先在 `RAG/llama-index/obsidian_graph_ingest_and_query` 跑完 `ingest_graphrag.py`，确保 `db_path` 与 `graph_path` 指向对应产物。

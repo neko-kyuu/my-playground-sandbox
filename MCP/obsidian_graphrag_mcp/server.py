@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
-from collections import deque
+from collections import Counter, deque
 from typing import Any, Dict, List, Optional, Set, Tuple, Literal, Union
 
 import chromadb
@@ -14,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.schema import NodeWithScore, QueryBundle
+from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 from llama_index.core.vector_stores import (
     MetadataFilter,
     MetadataFilters,
@@ -29,6 +30,8 @@ from chromadb.config import Settings as ChromaSettings
 
 
 JsonDict = Dict[str, Any]
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+_CJK_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
 
 def _read_json(path: str, default: Any) -> Any:
@@ -135,6 +138,47 @@ def _build_frontmatter_filters(
 
     condition = FilterCondition.AND if mode == "all" else FilterCondition.OR
     return MetadataFilters(filters=filters, condition=condition)
+
+
+def _normalize_frontmatter_items(frontmatter: Optional[Dict[str, Any]]) -> List[Tuple[str, Any]]:
+    normalized: List[Tuple[str, Any]] = []
+    for k, v in (frontmatter or {}).items():
+        key = _normalize_frontmatter_key(k)
+        if not key:
+            continue
+        if v is None or v == "":
+            continue
+        normalized.append((f"fm_{key}", v))
+    return normalized
+
+
+def _metadata_matches_frontmatter(
+    metadata: Dict[str, Any],
+    frontmatter_items: List[Tuple[str, Any]],
+    mode: Literal["any", "all"],
+) -> bool:
+    if not frontmatter_items:
+        return True
+
+    matches = [metadata.get(key) == value for key, value in frontmatter_items]
+    return all(matches) if mode == "all" else any(matches)
+
+
+def _tokenize_for_bm25(text: str) -> List[str]:
+    raw = str(text or "")
+    lowered = raw.lower()
+
+    tokens: List[str] = []
+    tokens.extend(m.group(0) for m in _LATIN_TOKEN_RE.finditer(lowered))
+
+    for match in _CJK_TOKEN_RE.finditer(raw):
+        chunk = match.group(0)
+        if len(chunk) == 1:
+            tokens.append(chunk)
+            continue
+        tokens.extend(chunk[i : i + 2] for i in range(len(chunk) - 1))
+
+    return tokens
 
 
 def _expand_sources(
@@ -299,6 +343,147 @@ class ObsidianGraphRAGRetriever(BaseRetriever):
         return merged[: self._final_top_k]
 
 
+@dataclass
+class BM25Document:
+    node: TextNode
+    term_freq: Counter[str]
+    length: int
+
+
+class InMemoryBM25Index:
+    def __init__(self, documents: List[BM25Document], k1: float = 1.5, b: float = 0.75):
+        self._documents = documents
+        self._k1 = float(k1)
+        self._b = float(b)
+        self._doc_freq: Counter[str] = Counter()
+
+        for doc in documents:
+            self._doc_freq.update(doc.term_freq.keys())
+
+        self._total_docs = len(documents)
+        total_length = sum(doc.length for doc in documents)
+        self._avgdl = (total_length / self._total_docs) if self._total_docs > 0 else 1.0
+        if self._avgdl <= 0:
+            self._avgdl = 1.0
+
+    @property
+    def total_docs(self) -> int:
+        return self._total_docs
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int,
+        allowed_sources: Optional[Set[str]] = None,
+        frontmatter_items: Optional[List[Tuple[str, Any]]] = None,
+        fm_match: Literal["any", "all"] = "any",
+    ) -> List[NodeWithScore]:
+        if self._total_docs <= 0 or top_k <= 0:
+            return []
+
+        query_terms = Counter(_tokenize_for_bm25(query))
+        if not query_terms:
+            return []
+
+        frontmatter_items = frontmatter_items or []
+        scored: List[NodeWithScore] = []
+
+        for doc in self._documents:
+            meta = doc.node.metadata or {}
+            source = meta.get("source")
+            if allowed_sources is not None and source not in allowed_sources:
+                continue
+            if not _metadata_matches_frontmatter(meta, frontmatter_items, fm_match):
+                continue
+
+            score = 0.0
+            for token, qtf in query_terms.items():
+                tf = doc.term_freq.get(token, 0)
+                if tf <= 0:
+                    continue
+                df = self._doc_freq.get(token, 0)
+                if df <= 0:
+                    continue
+
+                idf = math.log(1.0 + (self._total_docs - df + 0.5) / (df + 0.5))
+                denom = tf + self._k1 * (1.0 - self._b + self._b * (doc.length / self._avgdl))
+                score += qtf * idf * ((tf * (self._k1 + 1.0)) / denom)
+
+            if score > 0:
+                scored.append(NodeWithScore(node=doc.node, score=score))
+
+        scored.sort(key=lambda item: (item.score or 0.0), reverse=True)
+        return scored[:top_k]
+
+
+def _load_bm25_index(collection: Any, batch_size: int = 512) -> InMemoryBM25Index:
+    documents: List[BM25Document] = []
+    offset = 0
+
+    while True:
+        got = collection.get(include=["documents", "metadatas"], limit=batch_size, offset=offset)
+        ids = list(got.get("ids") or [])
+        if not ids:
+            break
+
+        texts = list(got.get("documents") or [])
+        metadatas = list(got.get("metadatas") or [])
+
+        for idx, node_id in enumerate(ids):
+            text = ""
+            if idx < len(texts) and texts[idx] is not None:
+                text = str(texts[idx])
+
+            meta: Dict[str, Any] = {}
+            if idx < len(metadatas) and isinstance(metadatas[idx], dict):
+                meta = dict(metadatas[idx] or {})
+
+            tokens = _tokenize_for_bm25(text)
+            documents.append(
+                BM25Document(
+                    node=TextNode(text=text, id_=str(node_id), metadata=meta),
+                    term_freq=Counter(tokens),
+                    length=len(tokens),
+                )
+            )
+
+        if len(ids) < batch_size:
+            break
+        offset += len(ids)
+
+    return InMemoryBM25Index(documents)
+
+
+def _rrf_fuse(
+    result_sets: List[List[NodeWithScore]],
+    rank_constant: int = 60,
+    top_k: Optional[int] = None,
+) -> List[NodeWithScore]:
+    if rank_constant < 1:
+        rank_constant = 1
+
+    fused_scores: Dict[str, float] = {}
+    representatives: Dict[str, NodeWithScore] = {}
+
+    for results in result_sets:
+        for rank, item in enumerate(results, 1):
+            node_id = item.node.node_id
+            fused_scores[node_id] = fused_scores.get(node_id, 0.0) + (1.0 / (rank_constant + rank))
+            if node_id not in representatives or (item.score or 0.0) > (representatives[node_id].score or 0.0):
+                representatives[node_id] = item
+
+    fused = [
+        NodeWithScore(node=representatives[node_id].node, score=score)
+        for node_id, score in fused_scores.items()
+        if node_id in representatives
+    ]
+    fused.sort(key=lambda item: (item.score or 0.0), reverse=True)
+
+    if top_k is not None and top_k > 0:
+        return fused[:top_k]
+    return fused
+
+
 def _llm_complete_text(llm: Any, prompt: str) -> str:
     if hasattr(llm, "complete"):
         resp = llm.complete(prompt)
@@ -357,6 +542,7 @@ class AppState:
     graph: JsonDict
     graph_nodes: Dict[str, Dict[str, Any]]
     index: VectorStoreIndex
+    bm25_index: InMemoryBM25Index
     embed_model: OpenAILikeEmbedding
     llm: Optional[OpenAILike]
 
@@ -518,6 +704,7 @@ def init_app_state(config_path: str) -> None:
 
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
     index = VectorStoreIndex.from_vector_store(vector_store=vector_store, embed_model=embed_model)
+    bm25_index = _load_bm25_index(chroma_collection)
 
     llm = None
     if cfg.dmx.chat_model:
@@ -534,6 +721,7 @@ def init_app_state(config_path: str) -> None:
         graph=graph,
         graph_nodes=graph_nodes,  # type: ignore[assignment]
         index=index,
+        bm25_index=bm25_index,
         embed_model=embed_model,
         llm=llm,
     )
@@ -605,7 +793,7 @@ def _create_mcp() -> FastMCP:
     """
     kwargs = dict(
         name="Obsidian GraphRAG (Search)",
-        instructions="Obsidian vault GraphRAG retrieval tools backed by Chroma + lightweight link graph expansion.",
+        instructions="Obsidian vault hybrid retrieval tools backed by BM25 + Chroma GraphRAG with lightweight link graph expansion.",
     )
     try:
         return FastMCP(**kwargs, version="0.1.0")  # type: ignore[arg-type]
@@ -643,6 +831,7 @@ def graphrag_stats() -> str:
     stats = {
         "graph_nodes": len(nodes),
         "graph_edges_sources": len(edges),
+        "bm25_docs": st.bm25_index.total_docs,
         "db_path": st.cfg.db_path,
         "collection": st.cfg.collection,
     }
@@ -669,6 +858,7 @@ def graphrag_search(
 ) -> JsonDict:
     st = _require_state()
     d = st.cfg.defaults
+    rrf_k = 60
 
     top_k_v = int(top_k if top_k is not None else d.top_k)
     hops_v = int(hops if hops is not None else d.hops)
@@ -697,6 +887,8 @@ def graphrag_search(
             }
 
     fm_filters = _build_frontmatter_filters(frontmatter=frontmatter, mode=fm_match)
+    frontmatter_items = _normalize_frontmatter_items(frontmatter)
+    candidate_top_k_v = max(final_top_k_v, max_results_v)
 
     retriever: BaseRetriever = ObsidianGraphRAGRetriever(
         index=st.index,
@@ -708,12 +900,25 @@ def graphrag_search(
         allowed_sources=allowed_sources,
         metadata_filters=fm_filters,
         max_sources=max_sources_v,
-        final_top_k=final_top_k_v,
+        final_top_k=candidate_top_k_v,
         max_seed_sources=max_seed_sources_v,
         neighbor_boost=neighbor_boost_v,
     )
 
-    nodes = retriever.retrieve(QueryBundle(query_str=query))
+    graphrag_nodes = retriever.retrieve(QueryBundle(query_str=query))
+    bm25_nodes = st.bm25_index.retrieve(
+        query=query,
+        top_k=candidate_top_k_v,
+        allowed_sources=allowed_sources,
+        frontmatter_items=frontmatter_items,
+        fm_match=fm_match,
+    )
+    fused_nodes = _rrf_fuse(
+        result_sets=[graphrag_nodes, bm25_nodes],
+        rank_constant=rrf_k,
+        top_k=candidate_top_k_v,
+    )
+    nodes = fused_nodes
     if max_results_v > 0:
         nodes = nodes[:max_results_v]
 
@@ -722,7 +927,13 @@ def graphrag_search(
         "query": query,
         "results": results,
         "debug": {
+            "retrieval_mode": "hybrid_bm25_graphrag_rrf",
             "allowed_sources_count": len(allowed_sources) if allowed_sources is not None else None,
+            "candidate_counts": {
+                "graphrag": len(graphrag_nodes),
+                "bm25": len(bm25_nodes),
+                "fused": len(fused_nodes),
+            },
             "params": {
                 "top_k": top_k_v,
                 "hops": hops_v,
@@ -736,6 +947,8 @@ def graphrag_search(
                 "text_chars": text_chars_v,
                 "tag_match": tag_match,
                 "fm_match": fm_match,
+                "candidate_top_k": candidate_top_k_v,
+                "rrf_k": rrf_k,
             },
             "tags": tags_norm,
             "frontmatter": frontmatter or {},
