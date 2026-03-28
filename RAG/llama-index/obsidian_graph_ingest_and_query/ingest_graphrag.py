@@ -35,7 +35,7 @@ def load_obsidian_docs(vault_path: str):
 
 
 # -------- 通用工具 --------
-PIPELINE_VERSION = "graphrag-v4-obsidian-clean-fm-filter"
+PIPELINE_VERSION = "graphrag-v5-obsidian-clean-callout-separator"
 
 WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 TAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_\-/]+)")  # 简易 tag 规则
@@ -43,11 +43,13 @@ TAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_\-/]+)")  # 简易 tag 规则
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 DATAVIEW_BLOCK_RE = re.compile(r"```(?:dataview|dataviewjs)\b[\s\S]*?```", re.IGNORECASE)
 LEAFLET_BLOCK_RE = re.compile(r"```leaflet\b[\s\S]*?```", re.IGNORECASE)
+HORIZONTAL_RULE_RE = re.compile(r"(?m)^\s*---\s*$")
 EMBED_WIKILINK_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 WIKILINK_ALIAS_RE = re.compile(r"(?<!!)\[\[[^\]|]+\|([^\]]+)\]\]")
 WIKILINK_SIMPLE_RE = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
-CALLOUT_RE = re.compile(r"(?m)^\s{0,3}>\s*\[![^\]]+\][+-]?\s*")
-INFOBOX_CALLOUT_START_RE = re.compile(r"(?i)^\s{0,3}>\s*\[!infobox\][+-]?\s*.*$")
+CALLOUT_MARKER = r"(?:\[![^\]]+\]|!\[[^\]]+\])"
+CALLOUT_RE = re.compile(rf"(?im)^\s{{0,3}}>\s*{CALLOUT_MARKER}[+-]?\s*")
+CALLOUT_START_RE = re.compile(rf"(?im)^\s{{0,3}}>\s*{CALLOUT_MARKER}[+-]?\s*.*$")
 BLOCKQUOTE_LINE_RE = re.compile(r"^\s{0,3}>")
 
 
@@ -276,14 +278,11 @@ def extract_frontmatter_tags(frontmatter: Dict[str, Any]) -> List[str]:
 def clean_obsidian_text(text: str) -> str:
     s = text or ""
 
-    # 移除 Dataview 查询块，避免无语义噪音进入 embedding。
-    s = DATAVIEW_BLOCK_RE.sub("\n", s)
-    # 移除 leaflet 代码块（通常是地图/交互配置，embedding 价值很低且噪声大）。
-    s = LEAFLET_BLOCK_RE.sub("\n", s)
-
-    def _unwrap_infobox_callouts(value: str) -> str:
+    # 先展开 callout，再清理其中的 dataview/leaflet 代码块。
+    # 否则被 `>` 包裹的 fenced block 无法被普通代码块正则匹配到。
+    def _unwrap_callouts(value: str) -> str:
         """
-        清理 Obsidian callout: > [!infobox]
+        清理 Obsidian callout: > [!type] / > ![type]
         - 去掉行首的 >
         - 丢弃 callout 标记行与内嵌图片行
         - 保留表格/标题等正文内容
@@ -294,7 +293,7 @@ def clean_obsidian_text(text: str) -> str:
 
         while i < len(lines):
             line = lines[i]
-            if INFOBOX_CALLOUT_START_RE.match(line):
+            if CALLOUT_START_RE.match(line):
                 i += 1
                 while i < len(lines) and BLOCKQUOTE_LINE_RE.match(lines[i]):
                     inner = re.sub(r"^\s{0,3}>\s?", "", lines[i])
@@ -314,7 +313,12 @@ def clean_obsidian_text(text: str) -> str:
 
         return "\n".join(out_lines)
 
-    s = _unwrap_infobox_callouts(s)
+    s = _unwrap_callouts(s)
+
+    # 移除 Dataview 查询块，避免无语义噪音进入 embedding。
+    s = DATAVIEW_BLOCK_RE.sub("\n", s)
+    # 移除 leaflet 代码块（通常是地图/交互配置，embedding 价值很低且噪声大）。
+    s = LEAFLET_BLOCK_RE.sub("\n", s)
     # 移除 Obsidian 嵌入引用 ![[...]]。
     s = EMBED_WIKILINK_RE.sub("", s)
 
@@ -332,6 +336,8 @@ def clean_obsidian_text(text: str) -> str:
 
     # Callout 标记（[!note]）去壳，保留正文。
     s = CALLOUT_RE.sub("", s)
+    # 清理单独的分隔线，避免把 Markdown HR 当作正文语义。
+    s = HORIZONTAL_RULE_RE.sub("", s)
 
     # 收敛空行，避免 chunk 中无意义换行过多。
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
