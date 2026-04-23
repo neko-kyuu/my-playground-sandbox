@@ -6,6 +6,7 @@ import re
 import json
 import argparse
 import hashlib
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Set, Tuple
 
 from dotenv import load_dotenv
@@ -529,191 +530,255 @@ def resolve_wikilink(link: str, note_index: Dict[str, str], vault_path: str) -> 
     return None
 
 
-def main():
-    load_dotenv(dotenv_path="/Users/nekokyuu/vscode/playground-sandbox/RAG/.env")
+@dataclass
+class LoadedVaultDocuments:
+    documents: List[Any]
+    existing_sources_for_prune: Optional[Set[str]] = None
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--vault", default=os.getenv("VAULT_PATH", "./markdown-notes"))
-    parser.add_argument("--db", default=os.getenv("GRAPH_DB_PATH", "./llama_chroma_db"))
-    parser.add_argument("--collection", default=os.getenv("CHROMA_COLLECTION", "quickstart"))
-    parser.add_argument("--graph", default=os.getenv("GRAPH_PATH", "./graphrag/obsidian_graph.json"))
-    parser.add_argument("--reset", action="store_true", help="删除并重建 collection + graph")
-    parser.add_argument("--prune", action="store_true", help="删除库/图里已不存在于 vault 的文件")
-    args = parser.parse_args()
 
-    DMX_API_KEY = os.getenv("DMX_API_KEY")
-    DMX_BASE_URL = os.getenv("DMX_BASE_URL", "https://www.dmxapi.cn/v1/")
-    DMX_EMBEDDING_MODEL = os.getenv("DMX_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
+class ObsidianGraphRAGIngestor:
+    """
+    Template-method ingest pipeline.
 
-    if not DMX_API_KEY:
-        raise ValueError("Missing DMX_API_KEY")
+    Vault variants should override configuration attributes plus narrow hooks
+    instead of copying the full vector/index/graph update flow.
+    """
 
-    # ---- Chroma ----
-    chroma_client = chromadb.PersistentClient(path=args.db)
-    if args.reset:
-        try:
-            chroma_client.delete_collection(args.collection)
-        except Exception:
-            pass
-    chroma_collection = chroma_client.get_or_create_collection(args.collection)
+    pipeline_version = PIPELINE_VERSION
+    dotenv_path = "/Users/nekokyuu/vscode/playground-sandbox/RAG/.env"
 
-    # ---- graph ----
-    if args.reset and os.path.exists(args.graph):
-        os.remove(args.graph)
-    graph = read_json(args.graph, default={"nodes": {}, "edges": {}})
+    vault_env = "VAULT_PATH"
+    db_env = "GRAPH_DB_PATH"
+    collection_env = "CHROMA_COLLECTION"
+    graph_env = "GRAPH_PATH"
+    api_key_env = "DMX_API_KEY"
+    api_base_env = "DMX_BASE_URL"
+    embedding_model_env = "DMX_EMBEDDING_MODEL"
+    embed_batch_size_env = "EMBED_BATCH_SIZE"
 
-    # ---- Embedding ----
-    embed_model = OpenAILikeEmbedding(
-        model_name=DMX_EMBEDDING_MODEL,
-        api_base=DMX_BASE_URL,
-        api_key=DMX_API_KEY,
-        embed_batch_size=int(os.getenv("EMBED_BATCH_SIZE", "10")),
-    )
+    default_vault = "./markdown-notes"
+    default_db = "./llama_chroma_db"
+    default_collection = "quickstart"
+    default_graph = "./graphrag/obsidian_graph.json"
+    default_api_base = "https://www.dmxapi.cn/v1/"
+    default_embedding_model = "Qwen/Qwen3-Embedding-8B"
 
-    # ---- Load docs from vault ----
-    documents = load_obsidian_docs(args.vault)
+    def build_arg_parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--vault", default=os.getenv(self.vault_env, self.default_vault))
+        parser.add_argument("--db", default=os.getenv(self.db_env, self.default_db))
+        parser.add_argument("--collection", default=os.getenv(self.collection_env, self.default_collection))
+        parser.add_argument("--graph", default=os.getenv(self.graph_env, self.default_graph))
+        parser.add_argument("--reset", action="store_true", help="删除并重建 collection + graph")
+        parser.add_argument("--prune", action="store_true", help="删除库/图里已不存在于 vault 的文件")
+        return parser
 
-    # 规范 source / hash / title 写回 metadata（供 Chroma filter + 图谱使用）
-    current_sources: Set[str] = set()
-    source_to_doc = {}
-    source_to_raw_text: Dict[str, str] = {}
-    source_to_tags: Dict[str, List[str]] = {}
-    to_index = []
-    excluded_sources: List[str] = []
+    def load_vault_documents(self, vault_path: str) -> LoadedVaultDocuments:
+        return LoadedVaultDocuments(documents=load_obsidian_docs(vault_path))
 
-    for doc in documents:
-        source = get_doc_source(doc)
+    def apply_custom_metadata(
+        self,
+        meta: Dict[str, Any],
+        source: str,
+        vault_path: str,
+        frontmatter: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return meta
 
-        title = get_doc_title(source)
-        raw_text = doc.text or ""
+    def find_removed_sources(
+        self,
+        known_sources: Set[str],
+        current_sources: Set[str],
+        loaded_vault: LoadedVaultDocuments,
+        vault_path: str,
+    ) -> List[str]:
+        return sorted(known_sources - current_sources)
 
-        frontmatter, body_text, frontmatter_raw = split_frontmatter(raw_text)
-        if not should_include_for_rag(frontmatter, frontmatter_raw):
-            # 该文件仍然存在于 vault，但明确要求不参与向量化/图谱：确保从库里移除。
+    def run(self, argv: Optional[List[str]] = None) -> None:
+        load_dotenv(dotenv_path=self.dotenv_path)
+
+        parser = self.build_arg_parser()
+        args = parser.parse_args(argv)
+
+        dmx_api_key = os.getenv(self.api_key_env)
+        dmx_base_url = os.getenv(self.api_base_env, self.default_api_base)
+        dmx_embedding_model = os.getenv(self.embedding_model_env, self.default_embedding_model)
+
+        if not dmx_api_key:
+            raise ValueError(f"Missing {self.api_key_env}")
+
+        # ---- Chroma ----
+        chroma_client = chromadb.PersistentClient(path=args.db)
+        if args.reset:
             try:
-                chroma_collection.delete(where={"source": source})
+                chroma_client.delete_collection(args.collection)
             except Exception:
                 pass
-            excluded_sources.append(source)
-            continue
+        chroma_collection = chroma_client.get_or_create_collection(args.collection)
 
-        current_sources.add(source)
-        source_to_doc[source] = doc
-        source_to_raw_text[source] = raw_text
+        # ---- graph ----
+        if args.reset and os.path.exists(args.graph):
+            os.remove(args.graph)
+        graph = read_json(args.graph, default={"nodes": {}, "edges": {}})
 
-        cleaned_text = clean_obsidian_text(body_text)
-        if cleaned_text:
-            set_doc_text(doc, cleaned_text)
-        else:
-            set_doc_text(doc, (body_text or "").strip() or raw_text)
-
-        tags = sorted(set(extract_tags(raw_text) + extract_frontmatter_tags(frontmatter)))
-        source_to_tags[source] = tags
-
-        try:
-            file_hash = sha256_file(source)
-        except Exception:
-            file_hash = hashlib.sha256((doc.text or "").encode("utf-8")).hexdigest()
-
-        meta = dict(doc.metadata or {})
-        meta.update(
-            {
-                "source": source,
-                "title": title,
-                "file_hash": file_hash,
-                "pipeline_version": PIPELINE_VERSION,
-            }
+        # ---- Embedding ----
+        embed_model = OpenAILikeEmbedding(
+            model_name=dmx_embedding_model,
+            api_base=dmx_base_url,
+            api_key=dmx_api_key,
+            embed_batch_size=int(os.getenv(self.embed_batch_size_env, "10")),
         )
 
-        if tags:
-            meta["tags_csv"] = "|".join(tags)
+        # ---- Load docs from vault ----
+        loaded_vault = self.load_vault_documents(args.vault)
+        documents = loaded_vault.documents
 
-        meta = merge_frontmatter_metadata(meta, frontmatter)
-        sanitized_meta = {}
-        for k, v in meta.items():
-            sv = sanitize_metadata_value(v)
-            if sv is not None:
-                sanitized_meta[str(k)] = sv
-        doc.metadata = sanitized_meta
+        # 规范 source / hash / title 写回 metadata（供 Chroma filter + 图谱使用）
+        current_sources: Set[str] = set()
+        source_to_doc = {}
+        source_to_raw_text: Dict[str, str] = {}
+        source_to_tags: Dict[str, List[str]] = {}
+        to_index = []
+        excluded_sources: List[str] = []
 
-        old_meta = chroma_get_one_meta(chroma_collection, source)
-        old_hash = (old_meta or {}).get("file_hash")
-        old_pipeline = (old_meta or {}).get("pipeline_version")
+        for doc in documents:
+            source = get_doc_source(doc)
 
-        if old_meta is None:
-            to_index.append(doc)
-        elif old_hash != file_hash or old_pipeline != PIPELINE_VERSION:
-            chroma_collection.delete(where={"source": source})
-            to_index.append(doc)
+            title = get_doc_title(source)
+            raw_text = doc.text or ""
 
-    # prune：删除 vault 中不存在的 source
-    if args.prune:
-        # 1) prune chroma（用 graph.nodes 里的 source 来做轻量遍历）
-        known_sources = set(graph.get("nodes", {}).keys()) | iter_all_sources(chroma_collection)
-        removed = sorted(known_sources - current_sources)
-        for s in removed:
-            chroma_collection.delete(where={"source": s})
-            graph["nodes"].pop(s, None)
-            graph["edges"].pop(s, None)
-        # 同时把所有 edges 里指向 removed 的也移除
-        removed_set = set(removed)
-        for s, nbrs in list(graph.get("edges", {}).items()):
-            graph["edges"][s] = [x for x in (nbrs or []) if x not in removed_set]
+            frontmatter, body_text, frontmatter_raw = split_frontmatter(raw_text)
+            if not should_include_for_rag(frontmatter, frontmatter_raw):
+                # 该文件仍然存在于 vault，但明确要求不参与向量化/图谱：确保从库里移除。
+                try:
+                    chroma_collection.delete(where={"source": source})
+                except Exception:
+                    pass
+                excluded_sources.append(source)
+                continue
 
-    # ---- 写入向量库（仅变更部分）----
-    if to_index:
-        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        ingest_transformations = build_ingest_transformations()
-        index_kwargs = {}
-        if ingest_transformations:
-            index_kwargs["transformations"] = ingest_transformations
+            current_sources.add(source)
+            source_to_doc[source] = doc
+            source_to_raw_text[source] = raw_text
 
-        _ = VectorStoreIndex.from_documents(
-            to_index,
-            storage_context=storage_context,
-            embed_model=embed_model,
-            show_progress=True,
-            **index_kwargs,
-        )
+            cleaned_text = clean_obsidian_text(body_text)
+            if cleaned_text:
+                set_doc_text(doc, cleaned_text)
+            else:
+                set_doc_text(doc, (body_text or "").strip() or raw_text)
 
-    # ---- 构建/更新图谱（仅变更部分也行；这里简单：对所有 current_sources 重算边，轻量且稳）----
-    note_index = build_note_index(list(current_sources), args.vault)
+            tags = sorted(set(extract_tags(raw_text) + extract_frontmatter_tags(frontmatter)))
+            source_to_tags[source] = tags
 
-    new_nodes = {}
-    new_edges: Dict[str, List[str]] = {}
+            try:
+                file_hash = sha256_file(source)
+            except Exception:
+                file_hash = hashlib.sha256((doc.text or "").encode("utf-8")).hexdigest()
 
-    for source in current_sources:
-        doc = source_to_doc.get(source)
-        if not doc:
-            continue
-        meta = doc.metadata or {}
-        file_hash = meta.get("file_hash")
-        title = meta.get("title") or get_doc_title(source)
+            meta = dict(doc.metadata or {})
+            meta.update(
+                {
+                    "source": source,
+                    "title": title,
+                    "file_hash": file_hash,
+                    "pipeline_version": self.pipeline_version,
+                }
+            )
 
-        text = source_to_raw_text.get(source, "")
-        links = extract_wikilinks(text)
-        tags = source_to_tags.get(source, [])
+            if tags:
+                meta["tags_csv"] = "|".join(tags)
 
-        nbrs = []
-        for lk in links:
-            resolved = resolve_wikilink(lk, note_index, args.vault)
-            if resolved and resolved != source:
-                nbrs.append(resolved)
+            meta = merge_frontmatter_metadata(meta, frontmatter)
+            meta = self.apply_custom_metadata(meta, source, args.vault, frontmatter)
+            sanitized_meta = {}
+            for k, v in meta.items():
+                sv = sanitize_metadata_value(v)
+                if sv is not None:
+                    sanitized_meta[str(k)] = sv
+            doc.metadata = sanitized_meta
 
-        new_nodes[source] = {"title": title, "file_hash": file_hash, "tags": tags}
-        new_edges[source] = sorted(set(nbrs))
+            old_meta = chroma_get_one_meta(chroma_collection, source)
+            old_hash = (old_meta or {}).get("file_hash")
+            old_pipeline = (old_meta or {}).get("pipeline_version")
 
-    graph["nodes"] = new_nodes
-    graph["edges"] = new_edges
-    write_json(args.graph, graph)
+            if old_meta is None:
+                to_index.append(doc)
+            elif old_hash != file_hash or old_pipeline != self.pipeline_version:
+                chroma_collection.delete(where={"source": source})
+                to_index.append(doc)
 
-    print(f"Done.")
-    print(f"- collection='{args.collection}' db='{args.db}'")
-    print(f"- graph='{args.graph}' nodes={len(graph['nodes'])} edges={sum(len(v) for v in graph['edges'].values())}")
-    print(f"- indexed(updated/new) docs={len(to_index)}")
-    if excluded_sources:
-        print(f"- excluded(rag.include=false) docs={len(excluded_sources)}")
+        # prune：删除 vault 中不存在的 source
+        if args.prune:
+            # 1) prune chroma（用 graph.nodes 里的 source 来做轻量遍历）
+            known_sources = set(graph.get("nodes", {}).keys()) | iter_all_sources(chroma_collection)
+            removed = self.find_removed_sources(known_sources, current_sources, loaded_vault, args.vault)
+            for s in removed:
+                chroma_collection.delete(where={"source": s})
+                graph["nodes"].pop(s, None)
+                graph["edges"].pop(s, None)
+            # 同时把所有 edges 里指向 removed 的也移除
+            removed_set = set(removed)
+            for s, nbrs in list(graph.get("edges", {}).items()):
+                graph["edges"][s] = [x for x in (nbrs or []) if x not in removed_set]
+
+        # ---- 写入向量库（仅变更部分）----
+        if to_index:
+            vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            ingest_transformations = build_ingest_transformations()
+            index_kwargs = {}
+            if ingest_transformations:
+                index_kwargs["transformations"] = ingest_transformations
+
+            _ = VectorStoreIndex.from_documents(
+                to_index,
+                storage_context=storage_context,
+                embed_model=embed_model,
+                show_progress=True,
+                **index_kwargs,
+            )
+
+        # ---- 构建/更新图谱（仅变更部分也行；这里简单：对所有 current_sources 重算边，轻量且稳）----
+        note_index = build_note_index(list(current_sources), args.vault)
+
+        new_nodes = {}
+        new_edges: Dict[str, List[str]] = {}
+
+        for source in current_sources:
+            doc = source_to_doc.get(source)
+            if not doc:
+                continue
+            meta = doc.metadata or {}
+            file_hash = meta.get("file_hash")
+            title = meta.get("title") or get_doc_title(source)
+
+            text = source_to_raw_text.get(source, "")
+            links = extract_wikilinks(text)
+            tags = source_to_tags.get(source, [])
+
+            nbrs = []
+            for lk in links:
+                resolved = resolve_wikilink(lk, note_index, args.vault)
+                if resolved and resolved != source:
+                    nbrs.append(resolved)
+
+            new_nodes[source] = {"title": title, "file_hash": file_hash, "tags": tags}
+            new_edges[source] = sorted(set(nbrs))
+
+        graph["nodes"] = new_nodes
+        graph["edges"] = new_edges
+        write_json(args.graph, graph)
+
+        print(f"Done.")
+        print(f"- collection='{args.collection}' db='{args.db}'")
+        print(f"- graph='{args.graph}' nodes={len(graph['nodes'])} edges={sum(len(v) for v in graph['edges'].values())}")
+        print(f"- indexed(updated/new) docs={len(to_index)}")
+        if excluded_sources:
+            print(f"- excluded(rag.include=false) docs={len(excluded_sources)}")
+
+
+def main(argv: Optional[List[str]] = None):
+    ObsidianGraphRAGIngestor().run(argv)
 
 
 if __name__ == "__main__":

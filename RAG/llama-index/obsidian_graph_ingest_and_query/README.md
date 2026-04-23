@@ -23,6 +23,31 @@ rerank（可选，OpenAI 兼容 rerank 接口）：
 python ingest_graphrag.py --vault /path/to/your/vault
 ```
 
+Vault OC 专用脚本使用独立环境变量，避免与默认 ingest 共用同名键：
+
+```bash
+python ingest_graphrag_vault_oc.py
+```
+
+对应变量名：
+- `VAULT_OC_VAULT_PATH`
+- `VAULT_OC_GRAPH_DB_PATH`
+- `VAULT_OC_CHROMA_COLLECTION`
+- `VAULT_OC_GRAPH_PATH`
+- `VAULT_OC_DMX_API_KEY`
+- `VAULT_OC_DMX_BASE_URL`
+- `VAULT_OC_DMX_EMBEDDING_MODEL`
+- `VAULT_OC_EMBED_BATCH_SIZE`
+
+### Ingest 变体开发
+
+`ingest_graphrag.py` 现在提供通用 `ObsidianGraphRAGIngestor` 模板流程，新的 vault 变体优先通过继承覆盖少量 hook，而不是复制整份脚本：
+
+- 配置项：覆盖 `pipeline_version`、环境变量名、默认 collection/graph 路径。
+- `load_vault_documents()`：自定义文件发现、过滤和 reader。
+- `apply_custom_metadata()`：补充 vault 专用 metadata。
+- `find_removed_sources()`：自定义 `--prune` 时哪些历史 source 应被删除。
+
 输出：
 - Chroma DB（默认 `./llama_chroma_db`）
 - 图文件（默认 `./graphrag/obsidian_graph.json`）
@@ -77,4 +102,3 @@ python agentic_query_graphrag.py "你的问题" --agent --agent_iters 2 --rag
 ```bash
 python agentic_query_graphrag.py "你的问题" --quiet
 ```
-
